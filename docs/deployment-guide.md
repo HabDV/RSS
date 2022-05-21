@@ -71,9 +71,9 @@ Turn to the fork automatically created by Railway and switch to the branch you'v
 
 [heroku_button]: https://www.herokucdn.com/deploy/button.svg
 
-[heroku_master]: https://heroku.com/deploy?template=https%3A%2F%2Fgithub.com%2FRongronggg9%2FRSS-to-Telegram-Bot%2Ftree%2Fmaster
+[heroku_master]: https://heroku.com/deploy?template=https%3A%2F%2Fgithub.com%2FHabDV%2FRSS%2Ftree%2Fmaster
 
-[heroku_dev]: https://heroku.com/deploy?template=https%3A%2F%2Fgithub.com%2FRongronggg9%2FRSS-to-Telegram-Bot%2Ftree%2Fdev
+[heroku_dev]: https://heroku.com/deploy?template=https%3A%2F%2Fgithub.com%2FHabDV%2FRSS%2Ftree%2Fdev
 
 ### Keep the dyno "awake"
 
