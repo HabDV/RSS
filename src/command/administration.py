@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Union, Optional
 
 import asyncio
+import re
 from telethon import events, Button
 from telethon.tl.patched import Message
 from telethon.tl import types
@@ -13,12 +14,13 @@ from ..parsing.post import get_post_from_entry
 from .utils import command_gatekeeper, parse_command, logger, parse_customization_callback_data
 from . import inner
 
+parseKeyValuePair = re.compile(r'^/\S+\s+([^\s=]+)(?:\s*=\s*|\s+)?(.+)?$')
+
 
 @command_gatekeeper(only_manager=True)
 async def cmd_set_option(event: Union[events.NewMessage.Event, Message], *_, lang: Optional[str] = None, **__):
-    raw_text = event.raw_text.replace('=', ' ')
-    args = parse_command(raw_text)
-    if len(args) < 3:  # return options info
+    kv = parseKeyValuePair.match(event.raw_text)
+    if not kv:  # return options info
         options = db.EffectiveOptions.options
         msg = (
                 f'<b>{i18n[lang]["current_options"]}</b>\n\n'
@@ -29,17 +31,18 @@ async def cmd_set_option(event: Union[events.NewMessage.Event, Message], *_, lan
         )
         await event.respond(msg, parse_mode='html')
         return
-    key = args[1]
-    value = args[2]
+    key, value = kv.groups()
 
     try:
         await db.EffectiveOptions.set(key, value)
     except KeyError:
         await event.respond(f'ERROR: {i18n[lang]["option_key_invalid"]}')
         return
-    except ValueError:
-        await event.respond(f'ERROR: {i18n[lang]["option_value_invalid"]}')
+    except TypeError as e:
+        await event.respond(f'ERROR: {i18n[lang]["option_value_invalid"]}\n\n{e}')
         return
+
+    value = db.EffectiveOptions.get(key)
 
     logger.info(f"Set option {key} to {value}")
 
@@ -47,7 +50,7 @@ async def cmd_set_option(event: Union[events.NewMessage.Event, Message], *_, lan
         all_feeds = await db.Feed.filter(state=1)
         for feed in all_feeds:
             env.loop.create_task(inner.utils.update_interval(feed))
-        logger.info(f"Flushed the interval of all feeds")
+        logger.info("Flushed the interval of all feeds")
 
     await event.respond(f'<b>{i18n[lang]["option_updated"]}</b>\n'
                         f'<code>{key}</code> = <code>{value}</code>',
@@ -99,7 +102,7 @@ async def cmd_test(event: Union[events.NewMessage.Event, Message], *_, lang: Opt
         )
 
     except Exception as e:
-        logger.warning(f"Sending failed:", exc_info=e)
+        logger.warning("Sending failed:", exc_info=e)
         await event.respond('ERROR: ' + i18n[lang]['internal_error'])
         return
 
@@ -126,7 +129,7 @@ async def cmd_user_info_or_callback_set_user(event: Union[events.NewMessage.Even
     else:
         state = None
         args = parse_command(event.raw_text, strip_target_chat=False)
-        if len(args) < 2 or not (args[1].lstrip('-').isdecimal() or args[1].startswith('@')):
+        if len(args) < 2 or (not args[1].lstrip('-').isdecimal() and not args[1].startswith('@')):
             await event.respond(i18n[lang]['cmd_user_info_usage_prompt_html'], parse_mode='html')
             return
         user_entity_like = int(args[1]) if args[1].lstrip('-').isdecimal() else args[1].lstrip('@')
@@ -159,7 +162,7 @@ async def cmd_user_info_or_callback_set_user(event: Union[events.NewMessage.Even
         user.state = state
         await user.save()
     state = user.state if user_id != env.MANAGER else None
-    sub_count = await inner.utils.count_sub(user_id) if not user_created else 0
+    sub_count = 0 if user_created else await inner.utils.count_sub(user_id)
 
     msg_text = (
             f"<b>{i18n[lang]['user_info']}</b>\n\n"
@@ -179,5 +182,5 @@ async def cmd_user_info_or_callback_set_user(event: Union[events.NewMessage.Even
         (Button.inline(f"{i18n[lang]['set_user_state_as']} \"{i18n[lang]['user_state_1']}\"",
                        data=f"set_user={user_id},1") if user.state != 1 else inner.utils.emptyButton,),
     ) if user_id != env.MANAGER else None
-    await event.respond(msg_text, parse_mode='html', buttons=buttons) if not is_callback \
-        else await event.edit(msg_text, parse_mode='html', buttons=buttons)
+    await event.edit(msg_text, parse_mode='html', buttons=buttons) if is_callback \
+        else await event.respond(msg_text, parse_mode='html', buttons=buttons)

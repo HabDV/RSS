@@ -22,6 +22,7 @@
         "uncaught_internal_error": "Error intern no detectat",
         "operation_timeout_error": "Temps d'espera de l'operació",
         "action_invalid": "L'acció no és vàlida",
+        "sub_limit_reached": "",
         "flood_wait_prompt": "Estàs operant amb tanta freqüència que el bot ha superat el límit de velocitat de Telegram. Si us plau, baixa el ritme.",
         "edit_conflict_prompt": "Estàs operant amb massa freqüència i l'operació entra en conflicte. Si us plau, baixa el ritme.",
         "callback_already_running_prompt": "Has sol·licitat una altra ordre. Torna-ho a provar un cop finalitzi.",
@@ -39,7 +40,8 @@
         "permission_denied_input_command": "",
         "permission_denied_no_direct_use": "",
         "promote_to_admin_prompt": "Si ets un administrador anònim d'aquest grup, promociona el bot a un administrador (no cal permís) per a donar poder al bot per a verificar la teva identitat.",
-        "group_upgrade_needed_prompt": "Oops, el teu grup no s'ha actualitzat a un supergrup. En general, el servidor de Telegram hauria de realitzar automàticament aquesta actualització en algun moment, però si no, has d'actualitzar-la manualment abans de poder utilitzar el bot.\nSi us plau, segueix aquests passos:\n1. Ves a la informació del grup i, a continuació, fes clic a «Gestionar el grup»\n2. Canvia «Historial de xat per a nous membres» a «Visible»\n3. Desa la configuració de visibilitat de l'historial de xat\n4. Desa tots els paràmetres\n5. (Opcional) Si cal, pots canviar «Historial de xat per a membres nous» a «Ocult» de nou\n6. Ara hauries de poder utilitzar el bot"
+        "group_upgrade_needed_prompt": "Oops, el teu grup no s'ha actualitzat a un supergrup. En general, el servidor de Telegram hauria de realitzar automàticament aquesta actualització en algun moment, però si no, has d'actualitzar-la manualment abans de poder utilitzar el bot.\nSi us plau, segueix aquests passos:\n1. Ves a la informació del grup i, a continuació, fes clic a «Gestionar el grup»\n2. Canvia «Historial de xat per a nous membres» a «Visible»\n3. Desa la configuració de visibilitat de l'historial de xat\n4. Desa tots els paràmetres\n5. (Opcional) Si cal, pots canviar «Historial de xat per a membres nous» a «Ocult» de nou\n6. Ara hauries de poder utilitzar el bot",
+        "sub_limit_reached_prompt": ""
     },
     "l10n_misc": {
         "choose_sub_prompt": "Triar una subscripció",

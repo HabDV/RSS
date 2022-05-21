@@ -82,7 +82,7 @@ class Parser:
             return None
 
         tag = soup.name
-        if tag is None:
+        if tag is None or 'sr-only' in soup.get('class', []):  # skip tags with no name or sr-only class
             return None
 
         if tag == 'table':
@@ -90,18 +90,18 @@ class Parser:
             if not rows:
                 return None
             rows_content = []
-            for row in rows:
+            for i, row in enumerate(rows):
                 columns = row.findAll(('td', 'th'))
-                if len(columns) != 1:
+                if len(rows) > 1 and len(columns) > 1:  # allow single-row or single-column tables
                     if env.TABLE_TO_IMAGE:
                         self.media.add(UploadedImage(convert_table_to_png(str(soup))))
                     return None
-                row_content = await self._parse_item(columns[0])
-                if row_content:
-                    if row_content.get_html().endswith('\n'):
+                for j, column in enumerate(columns):  # transpose single-row tables into single-column tables
+                    row_content = await self._parse_item(column)
+                    if row_content:
                         rows_content.append(row_content)
-                        continue
-                    rows_content.extend((row_content, Br()))
+                        if i < len(rows) - 1 or j < len(columns) - 1:
+                            rows_content.append(Br(2))
             return Text(rows_content) or None
 
         if tag == 'p' or tag == 'section':
@@ -116,6 +116,8 @@ class Parser:
             if not quote:
                 return None
             quote.strip()
+            if quote.is_empty():
+                return None
             return Text([Hr(), quote, Hr()])
 
         if tag == 'pre':
@@ -129,7 +131,7 @@ class Parser:
 
         if tag == 'a':
             text = await self._parse_item(soup.children)
-            if not text:
+            if not text or text.is_empty():
                 return None
             href = soup.get("href")
             if not href:
@@ -236,7 +238,7 @@ class Parser:
             if not src:
                 return None
             src = resolve_relative_link(self.feed_link, src)
-            title = await web.get_page_title(src)
+            title = urlparse(src).hostname if env.TRAFFIC_SAVING else await web.get_page_title(src)
             return Text([Br(2), Link(f'iframe ({title})', param=src), Br(2)])
 
         if tag == 'ol' or tag == 'ul':

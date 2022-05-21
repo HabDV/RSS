@@ -31,9 +31,7 @@ class Text:
         return type(self.content) is list
 
     def copy(self):
-        if not self.is_nested():
-            return self
-        return type(self)(self.content.copy(), self.param, copy=True)
+        return type(self)(self.content.copy(), self.param, copy=True) if self.is_nested() else self
 
     def strip(self, deeper: bool = False, strip_l: Optional[bool] = True, strip_r: Optional[bool] = True):
         if not self.is_nested():  # str
@@ -58,23 +56,27 @@ class Text:
     def rstrip(self, deeper: bool = False):
         self.strip(deeper=deeper, strip_l=False)
 
+    def is_empty(self, allow_whitespace: bool = False):
+        if self.is_listed():
+            return all(subText.is_empty(allow_whitespace=allow_whitespace) for subText in self.content)
+        elif self.is_nested():
+            return self.content.is_empty(allow_whitespace=allow_whitespace)
+        else:
+            return not (self.content if allow_whitespace else self.content and self.content.strip())
+
     def get_html(self, plain: bool = False) -> str:
         if self.is_listed():
-            result = ''
-            for subText in self.content:
-                result += subText.get_html(plain=plain)
+            result = ''.join(subText.get_html(plain=plain) for subText in self.content)
         elif self.is_nested():
             result = self.content.get_html(plain=plain)
         else:
             result = self.content
 
-        if plain:
-            return result.replace('\n', '')
-
-        if self.attr and self.param:
-            return f'<{self.tag} {self.attr}="{self.param}">{result}</{self.tag}>'
-        if self.tag:
-            return f'<{self.tag}>{result}</{self.tag}>'
+        if not plain:
+            if self.attr and self.param:
+                return f'<{self.tag} {self.attr}="{self.param}">{result}</{self.tag}>'
+            if self.tag:
+                return f'<{self.tag}>{result}</{self.tag}>'
         return result
 
     def split_html(self, length_limit_head: int, head_count: int = -1, length_limit_tail: int = 4096) -> list:
@@ -113,8 +115,7 @@ class Text:
                 if stripped:
                     split_list.append(stripped)  # split
             elif curr_length >= curr_length_limit and sub_text:
-                for subSubText in sub_text.split_html(curr_length_limit):
-                    split_list.append(subSubText)  # split
+                split_list.extend(sub_text.split_html(curr_length_limit))  # split
 
             return split_list
 
@@ -142,19 +143,16 @@ class Text:
                 instance = subText.find_instances(_class)
                 if instance:
                     result.extend(instance)
-            return result if result else None
+            return result or None
         if self.is_nested():
             instance = self.content.find_instances(_class, shallow)
             if instance:
                 result.extend(instance)
-        return result if result else None
+        return result or None
 
     def __len__(self):
-        length = 0
         if type(self.content) == list:
-            for subText in self.content:
-                length += len(subText)
-            return length
+            return sum(len(subText) for subText in self.content)
         return len(self.content)
 
     def __bool__(self):
@@ -245,9 +243,7 @@ class Br(TagWithoutParam):
         super().__init__('\n' * count)
 
     def get_html(self, plain: bool = False):
-        if plain:
-            return ''
-        return super().get_html()
+        return '' if plain else super().get_html()
 
 
 class Hr(TagWithoutParam):
@@ -255,9 +251,7 @@ class Hr(TagWithoutParam):
         super().__init__('\n----------------------\n')
 
     def get_html(self, plain: bool = False):
-        if plain:
-            return ''
-        return super().get_html()
+        return '' if plain else super().get_html()
 
 
 class ListItem(TagWithoutParam):
@@ -286,10 +280,8 @@ class OrderedList(ListParent):
         list_items = self.find_instances(ListItem, shallow=True)
         if not list_items:
             return
-        index = 1
-        for list_item in list_items:
+        for index, list_item in enumerate(list_items, start=1):
             list_item.content = [Bold(f'{index}. '), Text(list_item.content), Br()]
-            index += 1
 
 
 class UnorderedList(ListParent):
@@ -301,4 +293,4 @@ class UnorderedList(ListParent):
         if not list_items:
             return
         for list_item in list_items:
-            list_item.content = [Bold(f'● '), Text(list_item.content), Br()]
+            list_item.content = [Bold('● '), Text(list_item.content), Br()]

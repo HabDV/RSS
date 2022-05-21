@@ -5,21 +5,13 @@ from typing_extensions import Final
 import asyncio
 from aiographfix.utils import exceptions
 from aiohttp import ClientError
-
-# python-Levenshtein cannot handle UTF-8 input properly, mute the annoying warning from fuzzywuzzy
-import warnings
-
-warnings.original_warn = warnings.warn
-warnings.warn = lambda *args, **kwargs: None
-from fuzzywuzzy import fuzz
-
-warnings.warn = warnings.original_warn
+from rapidfuzz import fuzz
 
 from . import utils, tgraph
 from .splitter import get_plain_text_length
 from .html_parser import parse
 from .html_node import *
-from .medium import Media, Image, Video, Audio, File, construct_images_weserv_nl_url
+from .medium import Media, Image, Video, Audio, File, Animation, construct_images_weserv_nl_url
 
 AUTO: Final = 0
 DISABLE: Final = -1
@@ -156,7 +148,7 @@ class PostFormatter:
         tags = tags or []
 
         param_hash = f'{sub_title}|{tags}|{send_mode}|{length_limit}|{link_preview}|' \
-                     f'{display_author}|{display_via}|{display_title}|{style}'
+                     f'{display_author}|{display_via}|{display_title}|{display_media}|{style}'
 
         if param_hash in self.__param_to_option_cache:
             option_hash = self.__param_to_option_cache[param_hash]
@@ -197,7 +189,7 @@ class PostFormatter:
                     title_tbc = utils.stripAnySpace(title_tbc)
                     self.__title_similarity = fuzz.partial_ratio(title_tbc, plain_text[0:len(self.title) + 10])
                     logger.debug(f'{self.title} ({self.link}) '
-                                 f'is {self.__title_similarity}% likely to be of no title.')
+                                 f'is {self.__title_similarity:0.2f}% likely to be of no title.')
 
         if display_via in {FEED_TITLE_AND_LINK_AS_POST_TITLE, NO_FEED_TITLE_BUT_LINK_AS_POST_TITLE} and self.link:
             title_type = POST_TITLE_W_LINK
@@ -289,6 +281,13 @@ class PostFormatter:
 
         if message_type == NORMAL_MESSAGE and display_media == ONLY_MEDIA_NO_CONTENT and self.media:
             message_type = LINK_MESSAGE
+
+        # ---- re-enable title if needed ----
+        if (
+                title_type == NO_POST_TITLE and self.title
+                and display_title == AUTO and message_type in {TELEGRAPH_MESSAGE, LINK_MESSAGE}
+        ):
+            title_type = POST_TITLE_NO_LINK
 
         # ---- determine need_media ----
         need_media = (
@@ -504,17 +503,30 @@ class PostFormatter:
         if self.enclosures:
             for enclosure in self.enclosures:
                 # https://www.iana.org/assignments/media-types/media-types.xhtml
-                if not enclosure.url or self.media.url_exists(enclosure.url):
+                if not enclosure.url:
                     continue
-                if not utils.isAbsoluteHttpLink(enclosure.url) and parsed.parser.soup.findAll('a', href=enclosure.url):
+                dup_medium = self.media.url_exists(enclosure.url, loose=True)
+                if dup_medium is not None:
+                    if enclosure.url in dup_medium.original_urls:
+                        continue  # duplicated
+                    # add the url to the candidate list
+                    dup_medium.urls.insert(0, enclosure.url)
+                    dup_medium.original_urls = (enclosure.url,) + dup_medium.original_urls
+                    dup_medium.chosen_url = enclosure.url
                     continue
+                if not utils.isAbsoluteHttpLink(enclosure.url):
+                    if parsed.parser.soup.findAll('a', href=enclosure.url):
+                        continue  # the link is not an HTTP link and is already appearing in the post
+                    else:
+                        medium = File(enclosure.url)
+                        medium.valid = False
                 elif not enclosure.type:
                     medium = File(enclosure.url)
-                elif enclosure.type.find('webp') != -1 or enclosure.type.find('svg') != -1:
+                elif any(keyword in enclosure.type for keyword in ('webp', 'svg')):
                     medium = Image(enclosure.url)
                     medium.url = construct_images_weserv_nl_url(enclosure.url)
                 elif enclosure.type.startswith('image/gif'):
-                    medium = Audio(enclosure.url)
+                    medium = Animation(enclosure.url)
                 elif enclosure.type.startswith('audio'):
                     medium = Audio(enclosure.url)
                 elif enclosure.type.startswith('video'):
@@ -534,7 +546,8 @@ class PostFormatter:
                                                             title=self.title,
                                                             link=self.link,
                                                             feed_title=self.feed_title,
-                                                            author=self.author).telegraph_ify()
+                                                            author=self.author,
+                                                            feed_link=self.feed_link).telegraph_ify()
             return self.telegraph_link
         except exceptions.TelegraphError as e:
             if str(e) == 'CONTENT_TOO_BIG':

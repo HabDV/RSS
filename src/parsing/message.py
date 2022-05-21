@@ -135,14 +135,15 @@ class Message:
                     pass  # wait for flood wait
 
                 async with msg_lock:  # acquire a msg lock
-                    async with self.__overall_semaphore:  # only acquire overall semaphore when sending
+                    # only acquire overall semaphore when sending
+                    async with self.__overall_semaphore:
                         if self.media_type == MEDIA_GROUP:
                             media = []
                             for medium in self.media:
                                 _, fm, _ = await env.bot._file_to_media(medium)
                                 media.append(types.InputSingleMedia(fm, message=''))
-                            media[-1].message = self.plain_text if self.plain_text else ''
-                            media[-1].entities = self.format_entities if self.format_entities else None
+                            media[-1].message = self.plain_text or ''
+                            media[-1].entities = self.format_entities or None
                             entity = await env.bot.get_input_entity(self.user_id)
                             reply_to = get_message_id(reply_to)
                             request = functions.messages.SendMultiMediaRequest(entity,
@@ -151,8 +152,7 @@ class Message:
                                                                                silent=self.silent)
                             result = await env.bot(request)
                             random_ids = [m.random_id for m in media]
-                            ret = env.bot._get_response_message(random_ids, result, entity)
-                            return ret
+                            return env.bot._get_response_message(random_ids, result, entity)
                         # non-album
                         return await env.bot.send_message(entity=self.user_id,
                                                           message=self.plain_text,
@@ -162,6 +162,9 @@ class Message:
                                                           reply_to=reply_to,
                                                           link_preview=self.link_preview,
                                                           silent=self.silent)
+            # except locks.ContextTimeoutError:
+            #     logger.error(f'Msg dropped due to lock acquisition timeout ({self.user_id})')
+            #     return None
             except (FloodWaitError, SlowModeWaitError) as e:
                 # telethon has retried for us, but we release locks and retry again here to see if it will be better
                 if self.retries >= 1:
@@ -169,7 +172,7 @@ class Message:
                     return None
 
                 self.retries += 1
-                await locks.user_flood_wait(self.user_id, seconds=e.seconds)  # acquire a flood wait
+                await locks.user_flood_wait_background(self.user_id, seconds=e.seconds)  # acquire a flood wait
             except ServerError as e:
                 # telethon has retried for us, so we just retry once more
                 if self.retries >= 1:

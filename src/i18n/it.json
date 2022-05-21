@@ -22,6 +22,7 @@
         "uncaught_internal_error": "Errore interno non rilevato",
         "operation_timeout_error": "Timeout dell'operazione",
         "action_invalid": "Azione non valida",
+        "sub_limit_reached": "",
         "flood_wait_prompt": "Stai operando così troppo frequentemente che il bot ha superato il limite di velocità di Telegram. Per favore rallenta.",
         "edit_conflict_prompt": "State operando così troppo frequentemente che l'operazione va in conflitto. Per favore, rallenta.",
         "callback_already_running_prompt": "Hai richiesto un altro comando. Si prega di riprovare dopo che è terminato.",
@@ -39,7 +40,8 @@
         "permission_denied_input_command": "",
         "permission_denied_no_direct_use": "",
         "promote_to_admin_prompt": "Se sei un amministratore anonimo di questo gruppo, per favore promuovi il bot a un amministratore (non è necessario un permesso) per permettere al bot di verificare la tua identità.",
-        "group_upgrade_needed_prompt": "Ops, il tuo gruppo non è stato aggiornato a un supergruppo. Generalmente, il server Telegram dovrebbe eseguire automaticamente questo aggiornamento in un certo momento, ma se non lo fa, devi aggiornarlo manualmente prima di poter utilizzare il bot.\nPer favore segui questi passi:\n1. Vai alle informazioni sul gruppo, poi clicca su \"Gestisci gruppo\".\n2. Cambia \"Cronologia chat per i nuovi membri\" in \"Visibile\".\n3. Salva l'impostazione della visibilità della cronologia della chat\n4. Salva tutte le impostazioni\n5. (Opzionale) Se necessario, puoi cambiare \"Storia della chat per i nuovi membri\" di nuovo in \"Nascosto\n6. Ora dovresti essere in grado di usare il bot"
+        "group_upgrade_needed_prompt": "Ops, il tuo gruppo non è stato aggiornato a un supergruppo. Generalmente, il server Telegram dovrebbe eseguire automaticamente questo aggiornamento in un certo momento, ma se non lo fa, devi aggiornarlo manualmente prima di poter utilizzare il bot.\nPer favore segui questi passi:\n1. Vai alle informazioni sul gruppo, poi clicca su \"Gestisci gruppo\".\n2. Cambia \"Cronologia chat per i nuovi membri\" in \"Visibile\".\n3. Salva l'impostazione della visibilità della cronologia della chat\n4. Salva tutte le impostazioni\n5. (Opzionale) Se necessario, puoi cambiare \"Storia della chat per i nuovi membri\" di nuovo in \"Nascosto\n6. Ora dovresti essere in grado di usare il bot",
+        "sub_limit_reached_prompt": ""
     },
     "l10n_misc": {
         "choose_sub_prompt": "Per favore, scegli un abbonamento",

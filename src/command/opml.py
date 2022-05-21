@@ -10,14 +10,19 @@ from telethon.tl.patched import Message
 from .. import env, db
 from ..i18n import i18n
 from . import inner
-from .utils import command_gatekeeper, logger, send_success_and_failure_msg, get_callback_tail
+from .utils import command_gatekeeper, logger, send_success_and_failure_msg, get_callback_tail, check_sub_limit
 
 
 @command_gatekeeper(only_manager=False)
 async def cmd_import(event: Union[events.NewMessage.Event, Message],
                      *_,
+                     chat_id: Optional[int] = None,
                      lang: Optional[str] = None,
                      **__):
+    chat_id = chat_id or event.chat_id
+
+    await check_sub_limit(event, user_id=chat_id, lang=lang)
+
     await event.respond(
         i18n[lang]['send_opml_prompt'] + (
             '\n\n'
@@ -53,9 +58,12 @@ async def opml_import(event: Union[events.NewMessage.Event, Message],
                       chat_id: Optional[int] = None,
                       **__):
     chat_id = chat_id or event.chat_id
+
+    await check_sub_limit(event, user_id=chat_id, lang=lang)
+
     callback_tail = get_callback_tail(event, chat_id)
     reply_message: Message = await event.get_reply_message()
-    if not (event.is_private or event.is_channel and not event.is_group) and reply_message.sender_id != env.bot_id:
+    if event.is_group and reply_message.sender_id != env.bot_id:
         return  # must reply to the bot in a group to import opml
     try:
         opml_file = await event.download_media(file=bytes)
@@ -88,10 +96,10 @@ async def opml_import(event: Union[events.NewMessage.Event, Message],
         while sub_ids:
             curr_id = sub_ids.pop(0)
             if not sub_ids:
-                sub_ranges.append((curr_start if curr_start else curr_id, curr_id))
+                sub_ranges.append((curr_start or curr_id, curr_id))
                 break
             next_id = sub_ids[0]
-            if next_id == curr_id + 1 or next_id == curr_id:
+            if next_id in [curr_id + 1, curr_id]:
                 continue
             elif sum(sub.title is not None for sub in subs
                      if sub.id in range(curr_start, curr_id + 1)):  # if any sub has custom title
@@ -108,7 +116,7 @@ async def opml_import(event: Union[events.NewMessage.Event, Message],
         if not sub_ranges:
             return  # no subscription set custom title
 
-        button_data = f'del_subs_title=' + '|'.join(f'{start}-{end}' for start, end in sub_ranges) + callback_tail
+        button_data = 'del_subs_title=' + '|'.join(f'{start}-{end}' for start, end in sub_ranges) + callback_tail
         if len(button_data) <= 64:  # Telegram API limit
             button = [
                 [Button.inline(i18n[lang]['delete_subs_title_button'], button_data)],

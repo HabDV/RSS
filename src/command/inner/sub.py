@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Union, Optional
+from typing import Union, Optional, AnyStr
 from collections.abc import Sequence
 
 import re
@@ -11,10 +11,10 @@ from urllib.parse import urljoin
 from cachetools import TTLCache
 from os import path
 
-
 from ... import db, web
 from ...i18n import i18n
-from .utils import get_hash, update_interval, list_sub, get_http_caching_headers, filter_urls, logger, escape_html
+from .utils import get_hash, update_interval, list_sub, get_http_caching_headers, filter_urls, logger, escape_html, \
+    check_sub_limit
 from ...parsing.utils import html_space_stripper
 
 FeedSnifferCache = TTLCache(maxsize=256, ttl=60 * 60 * 24)
@@ -138,10 +138,22 @@ async def subs(user_id: int,
     if not feed_urls:
         return None
 
-    result = await asyncio.gather(*(sub(user_id, url, lang=lang) for url in feed_urls))
+    limit_reached, count, limit = await check_sub_limit(user_id)
+    if limit > 0:
+        remaining = limit - count if not limit_reached else 0
+        remaining_feed_urls = feed_urls[:remaining]
+        failure = [{'url': url, 'msg': 'ERROR: ' + i18n[lang]['sub_limit_reached']}
+                   for url in feed_urls[remaining:]]
+        if failure:
+            logger.info(f'Sub limit reached for {user_id}, rejected {len(failure)} feeds of {len(feed_urls)}')
+    else:
+        remaining_feed_urls = feed_urls
+        failure = []
+
+    result = await asyncio.gather(*(sub(user_id, url, lang=lang) for url in remaining_feed_urls))
 
     success = tuple(sub_d for sub_d in result if sub_d['sub'])
-    failure = tuple(sub_d for sub_d in result if not sub_d['sub'])
+    failure.extend(sub_d for sub_d in result if not sub_d['sub'])
 
     success_msg = (
             (f'<b>{i18n[lang]["sub_successful"]}</b>\n' if success else '')
@@ -311,24 +323,26 @@ FeedAHrefMatcher = re.compile(r'/(feed|rss|atom)(\.(xml|rss|atom))?$', re.I)
 FeedATextMatcher = re.compile(r'([^a-zA-Z]|^)(rss|atom)([^a-zA-Z]|$)', re.I)
 
 
-def feed_sniffer(url: str, html: str) -> Optional[str]:
+def feed_sniffer(url: str, html: AnyStr) -> Optional[str]:
     if url in FeedSnifferCache:
         return FeedSnifferCache[url]
-    if len(html) < 69:  # len of `<html><head></head><body></body></html>` + `<link rel="alternate" href="">`
-        return None  # too short to sniff
+    # if len(html) < 69:  # len of `<html><head></head><body></body></html>` + `<link rel="alternate" href="">`
+    #     return None  # too short to sniff
 
     soup = BeautifulSoup(html, 'lxml')
-    links = soup.find_all(name='link', attrs={'rel': 'alternate', 'type': FeedLinkTypeMatcher, 'href': True})
-    if not links:
-        links = soup.find_all(name='link', attrs={'rel': 'alternate', 'href': FeedLinkHrefMatcher})
-    if not links:
-        links = soup.find_all(name='a', attrs={'class': FeedATextMatcher})
-    if not links:
-        links = soup.find_all(name='a', attrs={'title': FeedATextMatcher})
-    if not links:
-        links = soup.find_all(name='a', attrs={'href': FeedAHrefMatcher})
-    if not links:
-        links = soup.find_all(name='a', text=FeedATextMatcher)
+    links = (
+            soup.find_all(name='link', attrs={'rel': 'alternate', 'type': FeedLinkTypeMatcher, 'href': True})
+            or
+            soup.find_all(name='link', attrs={'rel': 'alternate', 'href': FeedLinkHrefMatcher})
+            or
+            soup.find_all(name='a', attrs={'class': FeedATextMatcher})
+            or
+            soup.find_all(name='a', attrs={'title': FeedATextMatcher})
+            or
+            soup.find_all(name='a', attrs={'href': FeedAHrefMatcher})
+            or
+            soup.find_all(name='a', string=FeedATextMatcher)
+    )
     if links:
         feed_url = urljoin(url, links[0]['href'])
         FeedSnifferCache[url] = feed_url

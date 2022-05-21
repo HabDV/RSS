@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Union, Optional, AnyStr, Any
+from typing import Union, Optional, AnyStr
 from typing_extensions import Final
 from collections.abc import Callable
 from .compat import nullcontext, ssl_create_default_context
@@ -15,7 +15,6 @@ from bs4 import BeautifulSoup
 from io import BytesIO, SEEK_END
 from concurrent.futures import ThreadPoolExecutor
 from aiohttp_socks import ProxyConnector
-from aiohttp_retry import RetryClient, ExponentialRetry
 from dns.asyncresolver import resolve
 from dns.exception import DNSException
 from ssl import SSLError
@@ -29,11 +28,12 @@ from asyncstdlib.functools import lru_cache
 
 from . import env, log, locks
 from .i18n import i18n
+from .errors_collection import RetryInIpv4
 
 SOI: Final = b'\xff\xd8'
 EOI: Final = b'\xff\xd9'
 
-IMAGE_MAX_FETCH_SIZE: Final = 1024 * 5
+IMAGE_MAX_FETCH_SIZE: Final = 1024 * (1 if env.TRAFFIC_SAVING else 5)
 IMAGE_ITER_CHUNK_SIZE: Final = 128
 IMAGE_READ_BUFFER_SIZE: Final = 1
 
@@ -63,10 +63,11 @@ EXCEPTIONS_SHOULD_RETRY: Final = (asyncio.TimeoutError,
                                   # aiohttp.ClientResponseError,
                                   # aiohttp.ClientConnectionError,
                                   aiohttp.ServerConnectionError,
+                                  RetryInIpv4,
                                   TimeoutError,
                                   ConnectionError)
 
-RETRY_OPTION: Final = ExponentialRetry(attempts=2, start_timeout=1, exceptions=set(EXCEPTIONS_SHOULD_RETRY))
+MAX_TRIES: Final = 2
 
 PIL.ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -74,7 +75,7 @@ logger = log.getLogger('RSStT.web')
 
 _feedparser_thread_pool = ThreadPoolExecutor(1, 'feedparser_')
 
-contentDispositionFilenameParser = partial(re.compile(r'(?<=filename=").+?(?=")').search, flags=re.I)
+contentDispositionFilenameParser = partial(re.compile(r'(?<=filename=")[^"]+(?=")').search, flags=re.I)
 
 
 class WebError(Exception):
@@ -113,7 +114,7 @@ class WebError(Exception):
 @define
 class WebResponse:
     url: str  # redirected url
-    content: Any
+    content: Optional[AnyStr]
     headers: CIMultiDictProxy[str]
     status: int
     reason: Optional[str]
@@ -122,7 +123,7 @@ class WebResponse:
 @define
 class WebFeed:
     url: str  # redirected url
-    content: Optional[str] = None
+    content: Optional[AnyStr] = None
     headers: Optional[CIMultiDictProxy[str]] = None
     status: int = -1
     reason: Optional[str] = None
@@ -155,10 +156,14 @@ async def __norm_callback(response: aiohttp.ClientResponse, decode: bool = False
                           intended_content_type: Optional[str] = None) -> Optional[AnyStr]:
     content_type = response.headers.get('Content-Type')
     if not intended_content_type or not content_type or content_type.startswith(intended_content_type):
-        if decode:
+        body: Optional[bytes] = None
+        if max_size is None:
             body = await response.read()
+        elif max_size > 0:
+            body = await response.content.read(max_size)
+        if decode and body:
             xml_header = body.split(b'\n', 1)[0]
-            if xml_header.find(b'<?xml') == 0 and xml_header.find(b'?>') != -1:
+            if xml_header.startswith(b'<?xml') and b'?>' in xml_header and b'encoding' in xml_header:
                 try:
                     encoding = BeautifulSoup(xml_header, 'lxml-xml').original_encoding
                     return body.decode(encoding=encoding, errors='replace')
@@ -169,10 +174,7 @@ async def __norm_callback(response: aiohttp.ClientResponse, decode: bool = False
                 return body.decode(encoding=encoding, errors='replace')
             except (LookupError, RuntimeError):
                 return body.decode(encoding='utf-8', errors='replace')
-        elif max_size is None:
-            return await response.read()
-        elif max_size > 0:
-            return await response.content.read(max_size)
+        return body
     return None
 
 
@@ -184,23 +186,20 @@ async def get(url: str, timeout: Optional[float] = None, semaphore: Union[bool, 
     :param timeout: timeout in seconds
     :param semaphore: semaphore to use for limiting concurrent connections
     :param headers: headers to use
-    :param decode: whether to decode the response body (cannot mix with max_size)
+    :param decode: whether to decode the response body
     :param max_size: maximum size of the response body (in bytes), None=unlimited, 0=ignore response body
     :param intended_content_type: if specified, only return response if the content-type matches
     :return: {url, content, headers, status}
     """
     if not timeout:
         timeout = 12
-    wait_for_timeout = (timeout * 2 + 5) * (2 if env.IPV6_PRIOR else 1)
-    return await asyncio.wait_for(
-        _get(
-            url=url, timeout=timeout, semaphore=semaphore, headers=headers,
-            resp_callback=partial(__norm_callback, decode=decode, max_size=max_size,
-                                  intended_content_type=intended_content_type),
-            read_bufsize=min(max_size, DEFAULT_READ_BUFFER_SIZE) if max_size is not None else DEFAULT_READ_BUFFER_SIZE,
-            read_until_eof=max_size is None
-        ),
-        wait_for_timeout)
+    return await _get(
+        url=url, timeout=timeout, semaphore=semaphore, headers=headers,
+        resp_callback=partial(__norm_callback,
+                              decode=decode, max_size=max_size, intended_content_type=intended_content_type),
+        read_bufsize=min(max_size, DEFAULT_READ_BUFFER_SIZE) if max_size is not None else DEFAULT_READ_BUFFER_SIZE,
+        read_until_eof=max_size is None
+    )
 
 
 async def _get(url: str, resp_callback: Callable, timeout: Optional[float] = None,
@@ -211,8 +210,10 @@ async def _get(url: str, resp_callback: Callable, timeout: Optional[float] = Non
         else (semaphore or nullcontext())
     v6_rr_set = None
     try:
-        v6_rr_set = (await resolve(host, 'AAAA', lifetime=1)).rrset if env.IPV6_PRIOR else None
+        v6_rr_set = (await asyncio.wait_for(resolve(host, 'AAAA', lifetime=1), 1.1)).rrset if env.IPV6_PRIOR else None
     except DNSException:
+        pass
+    except asyncio.TimeoutError:
         pass
     except Exception as e:
         logger.debug(f'Error occurred when querying {url} AAAA:', exc_info=e)
@@ -222,13 +223,28 @@ async def _get(url: str, resp_callback: Callable, timeout: Optional[float] = Non
     if headers:
         _headers.update(headers)
 
+    async def _fetch():
+        async with aiohttp.ClientSession(connector=proxy_connector, timeout=aiohttp.ClientTimeout(total=timeout),
+                                         headers=_headers) as session:
+            async with session.get(url, read_bufsize=read_bufsize, read_until_eof=read_until_eof) as response:
+                status = response.status
+                content = None
+                if status == 200:
+                    content = await resp_callback(response)
+                return WebResponse(url=url,
+                                   content=content,
+                                   headers=response.headers,
+                                   status=status,
+                                   reason=response.reason)
+
     tries = 0
     retry_in_v4_flag = False
+    max_tries = MAX_TRIES * (1 if socket_family == 0 else 2)
     while True:
         tries += 1
-        assert tries <= 2, 'Too many tries'
+        assert tries <= max_tries, 'Too many tries'
 
-        if retry_in_v4_flag:
+        if retry_in_v4_flag or tries > MAX_TRIES:
             socket_family = AF_INET
         ssl_context = ssl_create_default_context()
         proxy_connector = (
@@ -240,33 +256,27 @@ async def _get(url: str, resp_callback: Callable, timeout: Optional[float] = Non
         try:
             async with locks.overall_web_semaphore:
                 async with semaphore_to_use:
-                    async with RetryClient(retry_options=RETRY_OPTION, connector=proxy_connector,
-                                           timeout=aiohttp.ClientTimeout(total=timeout), headers=_headers) as session:
-                        async with session.get(url,
-                                               read_bufsize=read_bufsize, read_until_eof=read_until_eof) as response:
-                            status = response.status
-                            content = None
-                            if status == 200:
-                                content = await resp_callback(response)
-                            elif socket_family == AF_INET6 and tries == 1 \
-                                    and status in (400,  # Bad Request (some feed providers return 400 for banned IPs)
-                                                   403,  # Forbidden
-                                                   429,  # Too Many Requests
-                                                   451):  # Unavailable For Legal Reasons
-                                retry_in_v4_flag = True
-                                continue
-                            return WebResponse(url=url,
-                                               content=content,
-                                               headers=response.headers,
-                                               status=status,
-                                               reason=response.reason)
+                    ret = await asyncio.wait_for(_fetch(), timeout + 0.1)
+                    if socket_family == AF_INET6 and tries < max_tries \
+                            and ret.status in {400,  # Bad Request (some feed providers return 400 for banned IPs)
+                                               403,  # Forbidden
+                                               429,  # Too Many Requests
+                                               451}:  # Unavailable For Legal Reasons
+                        raise RetryInIpv4(ret.status, ret.reason)
+                    return ret
         except EXCEPTIONS_SHOULD_RETRY as e:
-            if socket_family != AF_INET6 or tries > 1:
+            if isinstance(e, RetryInIpv4):
+                retry_in_v4_flag = True
+            elif socket_family == AF_INET6 and tries > MAX_TRIES:
+                retry_in_v4_flag = True
+                err_msg = str(e).strip()
+                e = RetryInIpv4(reason=f'{type(e).__name__}' + (f': {err_msg}' if err_msg else ''))
+            elif tries >= MAX_TRIES:
                 raise e
             err_msg = str(e).strip()
             logger.debug(f'Fetch failed ({type(e).__name__}' + (f': {err_msg}' if err_msg else '')
-                         + f') using IPv6, retrying using IPv4: {url}')
-            retry_in_v4_flag = True
+                         + f'), retrying: {url}')
+            await asyncio.sleep(0.1)
             continue
 
 
@@ -282,7 +292,7 @@ async def feed_get(url: str, timeout: Optional[float] = None, web_semaphore: Uni
         _headers['Accept'] = FEED_ACCEPT
 
     try:
-        resp = await get(url, timeout, web_semaphore, decode=True, headers=_headers)
+        resp = await get(url, timeout, web_semaphore, decode=False, headers=_headers)
         rss_content = resp.content
         ret.content = rss_content
         ret.url = resp.url
@@ -304,13 +314,14 @@ async def feed_get(url: str, timeout: Optional[float] = None, web_semaphore: Uni
             ret.error = WebError(error_name='status code error', status=status_caption, url=url, log_level=log_level)
             return ret
 
-        if len(rss_content) <= 524288:
-            rss_d = feedparser.parse(rss_content, sanitize_html=False)
-        else:  # feed too large, run in another thread to avoid blocking the bot
-            rss_d = await asyncio.get_event_loop().run_in_executor(_feedparser_thread_pool,
-                                                                   partial(feedparser.parse,
-                                                                           rss_content,
-                                                                           sanitize_html=False))
+        with BytesIO(rss_content) as rss_content_io:
+            parser = partial(feedparser.parse, rss_content_io, response_headers=resp.headers, sanitize_html=False)
+            rss_d = (
+                parser()
+                if len(rss_content) <= 64 * 1024
+                # feed too large, run in another thread to avoid blocking the bot
+                else await env.loop.run_in_executor(_feedparser_thread_pool, parser)
+            )
 
         if 'title' not in rss_d.feed:
             ret.error = WebError(error_name='feed invalid', url=url, log_level=log_level)
@@ -339,10 +350,10 @@ async def __medium_info_callback(response: aiohttp.ClientResponse) -> tuple[int,
     preloaded_length = content.total_bytes  # part of response body already came with the response headers
     if not (  # hey, here is a `not`!
             # a non-webp-or-svg image
-            (content_type.startswith('image') and content_type.find('webp') == -1 and content_type.find('svg') == -1)
+            (content_type.startswith('image') and all(keyword not in content_type for keyword in ('webp', 'svg')))
             or (
                     # an un-truncated webp image
-                    (content_type.find('webp') != -1 or content_type == 'application/octet-stream')
+                    any(keyword in content_type for keyword in ('webp', 'application'))
                     # PIL cannot handle a truncated webp image
                     and content_length <= max(preloaded_length, IMAGE_MAX_FETCH_SIZE)
             )
@@ -350,62 +361,64 @@ async def __medium_info_callback(response: aiohttp.ClientResponse) -> tuple[int,
         return -1, -1
     is_jpeg = None
     already_read = 0
-    buffer = BytesIO()
     eof_flag = False
-    while True:
-        if eof_flag or already_read >= IMAGE_MAX_FETCH_SIZE:
-            break
-
-        curr_chunk_length = 0
-        preloaded_length = content.total_bytes - already_read
-        while preloaded_length > IMAGE_READ_BUFFER_SIZE or curr_chunk_length < IMAGE_ITER_CHUNK_SIZE:
-            # get almost all preloaded bytes, but leaving some to avoid next automatic preloading
-            chunk = await content.read(max(preloaded_length - IMAGE_READ_BUFFER_SIZE, IMAGE_READ_BUFFER_SIZE))
-            if chunk == b'':  # EOF
-                eof_flag = True
-                break
-            if is_jpeg is None:
-                is_jpeg = chunk.startswith(SOI)
-            already_read += len(chunk)
-            curr_chunk_length += len(chunk)
-            buffer.seek(0, SEEK_END)
-            buffer.write(chunk)
+    exit_flag = False
+    with BytesIO() as buffer:
+        while not exit_flag:
+            curr_chunk_length = 0
             preloaded_length = content.total_bytes - already_read
-
-        # noinspection PyBroadException
-        try:
-            image = PIL.Image.open(buffer)
-            width, height = image.size
-            return width, height
-        except UnidentifiedImageError:
-            return -1, -1  # not a format that PIL can handle
-        except Exception:
-            if is_jpeg:
-                file_header = buffer.getvalue()
-                find_start_pos = 0
-                for _ in range(3):
-                    pointer = -1
-                    for marker in (b'\xff\xc2', b'\xff\xc1', b'\xff\xc0'):
-                        p = file_header.find(marker, find_start_pos)
-                        if p != -1:
-                            pointer = p
-                            break
-                    if pointer != -1 and pointer + 9 <= len(file_header):
-                        if file_header.count(EOI, 0, pointer) != file_header.count(SOI, 0, pointer) - 1:
-                            # we are currently entering the thumbnail in Exif, bypassing...
-                            # (why the specifications makers made Exif so freaky?)
-                            eoi_pos = file_header.find(EOI, pointer)
-                            if eoi_pos == -1:
-                                break  # no EOI found, we could never leave the thumbnail...
-                            find_start_pos = eoi_pos + len(EOI)
-                            continue
-                        width = int(file_header[pointer + 7:pointer + 9].hex(), 16)
-                        height = int(file_header[pointer + 5:pointer + 7].hex(), 16)
-                        if min(width, height) <= 0:
-                            find_start_pos = pointer + 1
-                            continue
-                        return width, height
+            while preloaded_length > IMAGE_READ_BUFFER_SIZE or curr_chunk_length < IMAGE_ITER_CHUNK_SIZE:
+                # get almost all preloaded bytes, but leaving some to avoid next automatic preloading
+                chunk = await content.read(max(preloaded_length - IMAGE_READ_BUFFER_SIZE, IMAGE_READ_BUFFER_SIZE))
+                if chunk == b'':  # EOF
+                    eof_flag = True
                     break
+                if is_jpeg is None:
+                    is_jpeg = chunk.startswith(SOI)
+                already_read += len(chunk)
+                curr_chunk_length += len(chunk)
+                buffer.seek(0, SEEK_END)
+                buffer.write(chunk)
+                preloaded_length = content.total_bytes - already_read
+
+            if eof_flag or already_read >= IMAGE_MAX_FETCH_SIZE:
+                response.close()  # immediately close the connection to block any incoming data or retransmission
+                exit_flag = True
+
+            # noinspection PyBroadException
+            try:
+                image = PIL.Image.open(buffer)
+                width, height = image.size
+                return width, height
+            except UnidentifiedImageError:
+                return -1, -1  # not a format that PIL can handle
+            except Exception:
+                if is_jpeg:
+                    file_header = buffer.getvalue()
+                    find_start_pos = 0
+                    for _ in range(3):
+                        pointer = -1
+                        for marker in (b'\xff\xc2', b'\xff\xc1', b'\xff\xc0'):
+                            p = file_header.find(marker, find_start_pos)
+                            if p != -1:
+                                pointer = p
+                                break
+                        if pointer != -1 and pointer + 9 <= len(file_header):
+                            if file_header.count(EOI, 0, pointer) != file_header.count(SOI, 0, pointer) - 1:
+                                # we are currently entering the thumbnail in Exif, bypassing...
+                                # (why the specifications makers made Exif so freaky?)
+                                eoi_pos = file_header.find(EOI, pointer)
+                                if eoi_pos == -1:
+                                    break  # no EOI found, we could never leave the thumbnail...
+                                find_start_pos = eoi_pos + len(EOI)
+                                continue
+                            width = int(file_header[pointer + 7:pointer + 9].hex(), 16)
+                            height = int(file_header[pointer + 5:pointer + 7].hex(), 16)
+                            if min(width, height) <= 0:
+                                find_start_pos = pointer + 1
+                                continue
+                            return width, height
+                        break
     return -1, -1
 
 
@@ -437,11 +450,11 @@ async def get_page_title(url: str, allow_hostname=True, allow_path: bool = False
     r = None
     # noinspection PyBroadException
     try:
-        r = await get(url=url, timeout=2, decode=True, intended_content_type='text/html')
+        r = await get(url=url, timeout=2, decode=False, intended_content_type='text/html', max_size=2 * 1024)
         if r.status != 200 or not r.content:
             raise ValueError('not an HTML page')
-        if len(r.content) <= 27:  # len of `<html><head><title></title>`
-            raise ValueError('invalid HTML')
+        # if len(r.content) <= 27:  # len of `<html><head><title></title>`
+        #     raise ValueError('invalid HTML')
         title = BeautifulSoup(r.content, 'lxml').title.text
         return title.strip()
     except Exception:

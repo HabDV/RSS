@@ -6,16 +6,16 @@ import asyncio
 import re
 from functools import partial, wraps
 from cachetools import TTLCache
-from telethon import events, Button
+from telethon import events, Button, hints
 from telethon.utils import get_peer_id, resolve_id
 from telethon.tl import types
 from telethon.tl.patched import Message, MessageService
 from telethon.tl.functions.bots import SetBotCommandsRequest
 from telethon.tl.functions.channels import GetParticipantRequest
 from telethon.errors import FloodError, MessageNotModifiedError, UserNotParticipantError, QueryIdInvalidError, \
-    EntitiesTooLongError, MessageTooLongError
+    EntitiesTooLongError, MessageTooLongError, BadRequestError
 
-from .. import env, log, db, locks
+from .. import env, log, db, locks, errors_collection
 from ..i18n import i18n, ALL_LANGUAGES
 from . import inner
 from ..errors_collection import UserBlockedErrors
@@ -35,8 +35,7 @@ def parse_command(command: str, max_split: int = 0, strip_target_chat: bool = Tr
         if len(temp) >= 2 and temp[1].startswith(('@', '-100')):
             del temp[1]
         command = ' '.join(temp)
-    ret = splitByWhitespace(command, maxsplit=max_split)
-    return ret
+    return splitByWhitespace(command, maxsplit=max_split)
 
 
 async def parse_command_get_sub_or_user_and_param(command: str,
@@ -104,7 +103,8 @@ def parse_customization_callback_data(callback_data: bytes) \
 
 async def respond_or_answer(event: Union[events.NewMessage.Event, Message,
                                          events.CallbackQuery.Event,
-                                         events.InlineQuery.Event],
+                                         events.InlineQuery.Event,
+                                         events.ChatAction.Event],
                             msg: str,
                             alert: bool = True,
                             cache_time: int = 120,
@@ -136,33 +136,42 @@ async def respond_or_answer(event: Union[events.NewMessage.Event, Message,
             await event.answer(switch_pm=msg, switch_pm_param=str(event.id), private=True)
             return  # return if answering successfully
 
-        async with locks.user_flood_lock(event.chat_id):
+        async with locks.ContextWithTimeout(locks.user_flood_lock(event.chat_id), timeout=30):
             pass  # wait for flood wait
 
-        await event.respond(msg, *args, **kwargs)
+        await event.respond(
+            msg, *args, **kwargs,
+            reply_to=event.message if isinstance(event, events.NewMessage.Event) and event.is_group else None
+        )
     except UserBlockedErrors:
         pass  # silently ignore
 
 
-async def is_self_admin(chat_id: int) -> Optional[bool]:
+async def is_self_admin(chat_id: hints.EntityLike) -> Optional[bool]:
+    """
+    Check if the bot itself is an admin in the chat.
+
+    :param chat_id: chat id
+    :return: True if the bot is an admin, False if not, None if self not in the chat
+    """
     ret, _ = await is_user_admin(chat_id, env.bot_id)
     return ret
 
 
 @cached_async(cache=TTLCache(maxsize=64, ttl=20))
-async def is_user_admin(chat_id: int, user_id: int) -> tuple[Optional[bool], Optional[str]]:
+async def is_user_admin(chat_id: hints.EntityLike, user_id: hints.EntityLike) -> tuple[Optional[bool], Optional[str]]:
     """
     Check if the user is an admin in the chat.
 
     :param chat_id: chat id
     :param user_id: user id
-    :return: True if user is admin, False if not, None if self not in the chat
+    :return: True if user is admin, False if not, None if self / the user not in the chat
     """
-    input_chat = await env.bot.get_input_entity(chat_id)
-    input_user = await env.bot.get_input_entity(user_id)
     is_admin = None
     participant_type = None
     try:
+        input_chat = await env.bot.get_input_entity(chat_id)
+        input_user = await env.bot.get_input_entity(user_id)
         # noinspection PyTypeChecker
         participant: types.channels.ChannelParticipant = await env.bot(
             GetParticipantRequest(input_chat, input_user))
@@ -172,6 +181,18 @@ async def is_user_admin(chat_id: int, user_id: int) -> tuple[Optional[bool], Opt
     except (UserNotParticipantError, ValueError):
         pass
     return is_admin, participant_type
+
+
+async def leave_chat(chat_id: hints.EntityLike) -> bool:
+    if isinstance(chat_id, int) and chat_id > 0:
+        return False  # a bot cannot delete the dialog with a user
+    try:
+        ret = await env.bot.delete_dialog(chat_id)
+        if ret:
+            logger.warning(f"Left chat {chat_id}")
+        return bool(ret)
+    except (BadRequestError, ValueError):
+        return False
 
 
 def command_gatekeeper(func: Optional[Callable] = None,
@@ -275,12 +296,15 @@ def command_gatekeeper(func: Optional[Callable] = None,
                 pending_callbacks.add(callback_msg_id)
             try:
                 logger.log(log_level, f'Allow {describe_user()} to use {command}')
-                async with flood_lock:
+                async with locks.ContextWithTimeout(flood_lock, timeout=timeout):
                     pass  # wait for flood wait
                 await asyncio.wait_for(
                     func(event, *args, lang=lang, chat_id=chat_id, **kwargs),  # execute the command!
                     timeout=timeout
                 )
+            except locks.ContextTimeoutError:
+                logger.error(f'Cancel {command} for {describe_user()} due to flood wait timeout ({timeout}s)')
+                # await respond_or_answer(event, 'ERROR: ' + i18n[lang]['flood_wait_prompt'])
             except asyncio.TimeoutError as _e:
                 logger.error(f'Cancel {command} for {describe_user()} due to timeout ({timeout}s)', exc_info=_e)
                 await respond_or_answer(event, 'ERROR: ' + i18n[lang]['operation_timeout_error'])
@@ -359,7 +383,7 @@ def command_gatekeeper(func: Optional[Callable] = None,
             target_chat_id = (pattern_match and pattern_match.groupdict().get('target')) or ''
             target_chat_id: Union[str, int, None] = target_chat_id.decode() \
                 if isinstance(target_chat_id, bytes) else target_chat_id
-            if target_chat_id.startswith('-100') and target_chat_id.lstrip('-').isdecimal():
+            if target_chat_id.startswith(('-100', '+')) and target_chat_id.lstrip('+-').isdecimal():
                 target_chat_id = int(target_chat_id)
             elif target_chat_id.isdecimal():
                 target_chat_id = -(1000000000000 + int(target_chat_id))
@@ -405,11 +429,19 @@ def command_gatekeeper(func: Optional[Callable] = None,
                     try:
                         input_chat = await env.bot.get_input_entity(target_chat_id)
                         chat = await env.bot.get_entity(input_chat)
-                        chat_id = get_peer_id(chat)
+                        chat_id = get_peer_id(chat, add_mark=True)
                         if not isinstance(chat, types.Channel):
-                            raise TypeError  # only allow operating channel/group in private chats
+                            # only allow operating channel/group in private chats
+                            if sender_id != env.MANAGER or not env.MANAGER_PRIVILEGED:
+                                raise TypeError
                         await user_and_chat_permission_check()
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError) as e:
+                        if isinstance(e, TypeError):
+                            logger.warning(f'Refused {describe_user()} to use {command} '
+                                           f'because only a privileged bot manager can manipulate ordinary users')
+                        else:
+                            logger.warning(f'Refused {describe_user()} to use {command} '
+                                           f'because the target chat was not found')
                         await respond_or_answer(event, i18n[lang]['channel_or_group_not_found'])
                         raise events.StopPropagation
                 else:
@@ -418,7 +450,12 @@ def command_gatekeeper(func: Optional[Callable] = None,
                                                types.InputPeerChannel,
                                                types.InputPeerChat]] = await event.get_input_chat()
                     chat: Optional[Union[types.Chat, types.Channel]] = await event.get_chat()
-                chat_title = chat and chat.title
+
+                chat_title = chat and (
+                    chat.first_name + (f' {chat.last_name}' if chat.last_name else '')
+                    if isinstance(chat, types.User)
+                    else chat.title
+                )
 
                 if isinstance(input_chat, types.InputPeerChat):
                     if allow_in_old_fashioned_groups:
@@ -430,6 +467,11 @@ def command_gatekeeper(func: Optional[Callable] = None,
                     await event.respond(guide_msg, buttons=guide_buttons)
                     logger.warning(f'Refused {describe_user()} to use {command} '
                                    f'because a group migration to supergroup is needed')
+                    raise events.StopPropagation
+
+                if sender_id == env.MANAGER and env.MANAGER_PRIVILEGED:
+                    participant_type = 'PrivilegedBotManager'
+                    await execute()
                     raise events.StopPropagation
 
                 # check if self is in the group/chanel and if is an admin
@@ -486,12 +528,10 @@ def command_gatekeeper(func: Optional[Callable] = None,
                 exc_info=e
             )
             try:
-                if isinstance(e, FloodError):
+                if isinstance(e, (FloodError, locks.ContextTimeoutError)):
                     # blocking other commands to be executed and messages to be sent
                     if hasattr(e, 'seconds') and e.seconds is not None:
-                        await locks.user_flood_wait(chat_id, e.seconds)  # acquire a flood wait
-                    async with locks.user_flood_lock(chat_id):
-                        pass  # wait for flood wait (if another request has acquired a flood wait)
+                        await locks.user_flood_wait_background(chat_id, e.seconds)  # acquire a flood wait
                     await respond_or_answer(event, 'ERROR: ' + i18n[lang]['flood_wait_prompt'])
                     await env.bot(e.request)  # resend
                 # usually occurred because the user hits the same button during auto flood wait
@@ -499,9 +539,17 @@ def command_gatekeeper(func: Optional[Callable] = None,
                     await respond_or_answer(event, 'ERROR: ' + i18n[lang]['edit_conflict_prompt'])
                 elif isinstance(e, (EntitiesTooLongError, MessageTooLongError)):
                     await respond_or_answer(event, 'ERROR: ' + i18n[lang]['message_too_long_prompt'])
+                elif isinstance(e, errors_collection.UserBlockedErrors):
+                    tasks = []
+                    if await inner.utils.have_subs(chat_id):
+                        tasks.append(inner.sub.unsub_all(chat_id))
+                    if chat_id < 0:  # it is a group
+                        tasks.append(leave_chat(chat_id))
+                    if tasks:
+                        await asyncio.gather(*tasks)
                 else:
                     await respond_or_answer(event, 'ERROR: ' + i18n[lang]['uncaught_internal_error'])
-            except (FloodError, MessageNotModifiedError):
+            except (FloodError, MessageNotModifiedError, locks.ContextTimeoutError):
                 pass  # we can do nothing but be a pessimism to drop it
             except Exception as e:
                 logger.error('Uncaught error occurred when dealing with an uncaught error', exc_info=e)
@@ -528,11 +576,9 @@ class NewFileMessage(events.NewMessage):
         if not document:
             return
         if self.filename_pattern:
-            filename = None
-            for attr in document.attributes:
-                if isinstance(attr, types.DocumentAttributeFilename):
-                    filename = attr.file_name
-                    break
+            filename = next(
+                (attr.file_name for attr in document.attributes if isinstance(attr, types.DocumentAttributeFilename)),
+                None)
             if not self.filename_pattern(filename or ''):
                 return
         return super().filter(event)
@@ -683,14 +729,27 @@ def get_group_migration_help_msg(lang: Optional[str] = None) \
             Button.inline(i18n[_lang]['lang_native_name'], data=f'get_group_migration_help={_lang}')
             for _lang in ALL_LANGUAGES if _lang != lang
         ),
-        columns=3)
+        columns=2)
     return msg, buttons
 
 
 def get_callback_tail(event: Union[events.NewMessage.Event, Message,
                                    events.CallbackQuery.Event],
                       chat_id: int) -> str:
-    if 0 > chat_id != event.chat_id and event.is_private:
-        chat_id_str, _ = resolve_id(chat_id)
-        return f'%{chat_id_str}'
-    return ''
+    if not event.is_private or event.chat.id == chat_id:
+        return ''
+    ori_chat_id, peer_type = resolve_id(chat_id)
+    if peer_type is types.PeerChat:
+        raise ValueError('Old-fashioned group chat is not supported')
+    return f'%{ori_chat_id}' if ori_chat_id < 0 else f'%+{ori_chat_id}'
+
+
+async def check_sub_limit(event: Union[events.NewMessage.Event, Message], user_id: int, lang: Optional[str] = None):
+    limit_reached, curr_count, limit = await inner.utils.check_sub_limit(user_id)
+    if limit_reached:
+        logger.warning(f'Refused user {user_id} to add new subscriptions due to limit reached ({curr_count}/{limit})')
+        msg = i18n[lang]['sub_limit_reached_prompt'] % (curr_count, limit)
+        if db.EffectiveOptions.sub_limit_reached_message:
+            msg += f'\n\n{db.EffectiveOptions.sub_limit_reached_message}'
+        await event.respond(msg)
+        raise events.StopPropagation

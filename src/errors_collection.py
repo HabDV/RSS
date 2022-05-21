@@ -1,6 +1,8 @@
 from __future__ import annotations
 from typing import Union
 
+import asyncio
+from aiohttp import ClientError
 from telethon.errors import (
     UserIsBlockedError, UserIdInvalidError, ChatWriteForbiddenError, ChannelPrivateError, InputUserDeactivatedError,
     PhotoInvalidDimensionsError, PhotoSaveFileInvalidError, PhotoInvalidError, PhotoCropSizeSmallError,
@@ -16,6 +18,10 @@ class EntityNotFoundError(ValueError):
         super().__init__(f"Entity not found: {peer}")
 
 
+class ContextTimeoutError(asyncio.TimeoutError):
+    pass
+
+
 UserBlockedErrors: tuple = (UserIsBlockedError, UserIdInvalidError, ChatWriteForbiddenError, ChannelPrivateError,
                             InputUserDeactivatedError, ChatAdminRequiredError, EntityNotFoundError)
 InvalidMediaErrors: tuple = (PhotoInvalidDimensionsError, PhotoSaveFileInvalidError, PhotoInvalidError,
@@ -24,3 +30,10 @@ InvalidMediaErrors: tuple = (PhotoInvalidDimensionsError, PhotoSaveFileInvalidEr
                              VideoContentTypeInvalidError, VideoFileInvalidError, ExternalUrlInvalidError)
 ExternalMediaFetchFailedErrors: tuple = (WebpageCurlFailedError, WebpageMediaEmptyError, MediaEmptyError)
 MediaSendFailErrors = InvalidMediaErrors + ExternalMediaFetchFailedErrors
+
+
+class RetryInIpv4(ClientError):
+    def __init__(self, code: int = None, reason: str = None):
+        self.code = code
+        self.reason = reason
+        super().__init__(f'{code} {reason}' if code and reason else (code or reason or ''))
